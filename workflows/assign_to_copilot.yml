@@ -1,0 +1,90 @@
+name: Assign Issue to Copilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'The number of the issue to assign to Copilot'
+        required: true
+      repository_owner:
+        description: 'Repository owner (org or user)'
+        required: true
+        type: string
+      repository_name:
+        description: 'Repository name'
+        required: true
+        type: string
+
+jobs:
+  assign_to_copilot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get Copilot Bot ID
+        id: get_copilot_id
+        run: |
+          response=$(gh api graphql -f query='
+            query {
+              repository(owner: "${{ inputs.repository_owner }}", name: "${{ inputs.repository_name }}") {
+                suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
+                  nodes {
+                    login
+                    __typename
+                    ... on Bot { id }
+                    ... on User { id }
+                  }
+                }
+              }
+            }
+          ')
+
+          copilot_id=$(echo "$response" | jq -r '.data.repository.suggestedActors.nodes[] | select(.login == "copilot-swe-agent") | .id')
+
+          if [ -z "$copilot_id" ]; then
+            echo "Error: Copilot coding agent is not enabled on ${{ inputs.repository_owner }}/${{ inputs.repository_name }}"
+            exit 1
+          fi
+
+          echo "copilot_id=$copilot_id" >> $GITHUB_OUTPUT
+          echo "Found Copilot bot with ID: $copilot_id"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Issue Node ID
+        id: get_issue_id
+        run: |
+          response=$(gh api graphql -f query='
+            query {
+              repository(owner: "${{ inputs.repository_owner }}", name: "${{ inputs.repository_name }}") {
+                issue(number: ${{ inputs.issue_number }}) {
+                  id
+                  title
+                }
+              }
+            }
+          ')
+
+          issue_id=$(echo "$response" | jq -r '.data.repository.issue.id')
+
+          if [ -z "$issue_id" ] || [ "$issue_id" = "null" ]; then
+            echo "Error: Issue #${{ inputs.issue_number }} not found in ${{ inputs.repository_owner }}/${{ inputs.repository_name }}"
+            exit 1
+          fi
+
+          echo "issue_id=$issue_id" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assign Issue to Copilot
+        run: |
+          gh api graphql -f query="
+            mutation {
+              replaceActorsForAssignable(input: {
+                assignableId: \"${{ steps.get_issue_id.outputs.issue_id }}\",
+                actorIds: [\"${{ steps.get_copilot_id.outputs.copilot_id }}\"]
+              }) {
+                clientMutationId
+              }
+            }"
+          echo "Assigned issue #${{ inputs.issue_number }} to Copilot"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
